@@ -1,6 +1,26 @@
+"""Parquet-based state management following the losore CDC pattern.
+
+Maintains three Parquet files on disk (or GCS via :func:`entrypoint.sync_to_gcs`):
+
+* ``notices.parquet`` — one row per ``doffin_id``, with content hash for
+  change detection, notice metadata, and org/party counts.
+* ``parties.parquet`` — one row per ``(doffin_id, orgnr, role)`` combination,
+  with bid values and winner/leader flags.
+* ``changelog/YYYY-MM-DD.parquet`` — append-only daily log of new and
+  modified notices, written once per pipeline run.
+
+Change detection uses SHA-256 of the raw XML bytes.  If the hash matches
+the stored hash, :meth:`StateManager.ingest_notice` returns ``False``
+(no change) and only updates the ``last_seen`` timestamp.  If the hash
+differs, all party rows for that notice are replaced and a ``modified``
+changelog entry is written.
+
+All Parquet files use ZSTD compression.  At full corpus size (~151K notices,
+~300K party rows), expected file sizes are ~2 MB notices, ~5 MB parties.
+"""
+
 import pyarrow as pa
 import pyarrow.parquet as pq
-import json
 import os
 from datetime import datetime, timezone, date
 
@@ -19,6 +39,23 @@ NOTICES_SCHEMA = pa.schema([
     ("first_seen", pa.string()),
     ("last_seen", pa.string()),
 ])
+"""PyArrow schema for the notices state file.
+
+Columns:
+    doffin_id: Primary key (e.g., ``"2026-105663"``).
+    root_type: XML document type.
+    notice_type_code: eForms subtype code.
+    issue_date: From ``cbc:IssueDate`` in XML.
+    publication_date: From search result ``publicationDate``.
+    procedure_id: ``cbc:ContractFolderID`` linking related notices.
+    customization_id: eForms SDK version + Norwegian extension flag.
+    content_hash: SHA-256[:16] of raw XML bytes.
+    xml_size: Raw XML byte count.
+    n_organizations: Count of orgs in eForms pool.
+    n_parties: Count of resolved role assignments.
+    first_seen: UTC ISO timestamp of first ingestion.
+    last_seen: UTC ISO timestamp of most recent ingestion.
+"""
 
 PARTIES_SCHEMA = pa.schema([
     ("doffin_id", pa.string()),
@@ -31,6 +68,19 @@ PARTIES_SCHEMA = pa.schema([
     ("is_winner", pa.bool_()),
     ("is_leader", pa.bool_()),
 ])
+"""PyArrow schema for the parties state file.
+
+Columns:
+    doffin_id: Parent notice.
+    role: One of ``buyer``, ``winner``, ``tenderer``, ``subcontractor``.
+    orgnr: 9-digit Norwegian org number (spaces stripped).
+    name: Organization name from BT-500.
+    lot_id: Lot identifier (e.g., ``"LOT-0000"``), or ``None`` for buyers.
+    tender_value: Bid amount as numeric string, or ``None``.
+    currency: ISO currency code (usually ``"NOK"``), or ``None``.
+    is_winner: ``True`` if this tender's LotTender is in a SettledContract.
+    is_leader: ``True`` for group lead in consortium tenders.
+"""
 
 CHANGELOG_SCHEMA = pa.schema([
     ("doffin_id", pa.string()),
@@ -43,9 +93,49 @@ CHANGELOG_SCHEMA = pa.schema([
     ("detected_at", pa.string()),
     ("source", pa.string()),
 ])
+"""PyArrow schema for the daily changelog.
+
+Columns:
+    doffin_id: Notice that changed.
+    change_type: ``"new"`` or ``"modified"``.
+    publication_date: From search result.
+    root_type: XML document type.
+    buyer_orgnr: Buyer orgnr for quick portfolio filtering.
+    buyer_name: Buyer name.
+    n_parties: Total party rows for this notice.
+    detected_at: UTC ISO timestamp when change was found.
+    source: ``"daily"``, ``"backfill"``, or ``"test"``.
+"""
 
 
 class StateManager:
+    """Manages Parquet-based pipeline state on the local filesystem.
+
+    Loads existing state from disk on initialization.  Accumulates changes
+    in memory via :meth:`ingest_notice`.  Flushes to disk via :meth:`save`.
+
+    Args:
+        state_dir: Directory for state files.  Created if it doesn't exist.
+            Expected layout after first run::
+
+                state_dir/
+                    notices.parquet
+                    parties.parquet
+                    changelog/
+                        2026-03-25.parquet
+                    raw/
+                        2026-03-25/
+                            2026-105663.xml
+
+    Examples:
+        >>> state = StateManager("/tmp/doffin-state")
+        >>> state.notice_count()
+        0
+        >>> changed = state.ingest_notice("2026-105663", xml, parsed, hit)
+        >>> changed
+        True
+        >>> state.save()
+    """
 
     def __init__(self, state_dir):
         self.state_dir = state_dir
@@ -65,6 +155,12 @@ class StateManager:
         self._load()
 
     def _load(self):
+        """Load existing state from Parquet files on disk.
+
+        Populates :attr:`_notices_index` (dict keyed by ``doffin_id``) and
+        :attr:`_parties_rows` (column-oriented dict).  Called once during
+        ``__init__``.
+        """
         if os.path.exists(self.notices_path):
             table = pq.read_table(self.notices_path)
             d = table.to_pydict()
@@ -81,15 +177,51 @@ class StateManager:
             print(f"  Loaded {n:,} party rows from state", flush=True)
 
     def known_ids(self):
+        """Return the set of all ingested doffin_ids.
+
+        Returns:
+            Set of doffin_id strings.  Used by the entrypoint to skip
+            already-known notices during backfill.
+        """
         return set(self._notices_index.keys())
 
     def notice_count(self):
+        """Return the number of notices in state.
+
+        Returns:
+            Integer count.
+        """
         return len(self._notices_index)
 
     def party_count(self):
+        """Return the number of party rows in state.
+
+        Returns:
+            Integer count.
+        """
         return len(self._parties_rows["doffin_id"])
 
     def ingest_notice(self, doffin_id, xml_bytes, parsed, search_hit, source="daily"):
+        """Insert or update a notice in state.
+
+        Change detection: computes SHA-256[:16] of ``xml_bytes`` and compares
+        against the stored ``content_hash``.  If they match, only ``last_seen``
+        is updated and the method returns ``False``.  Otherwise, the notice
+        metadata is updated, all party rows for this ``doffin_id`` are replaced
+        with the freshly parsed parties, and a changelog entry is written.
+
+        Args:
+            doffin_id: Notice identifier (e.g., ``"2026-105663"``).
+            xml_bytes: Raw XML as ``bytes``.
+            parsed: Dict as returned by :func:`~parse.parse_notice`.
+            search_hit: Search result dict (used for ``publicationDate``).
+                Pass ``None`` to fall back to ``parsed["issue_date"]``.
+            source: Changelog source label.  One of ``"daily"``,
+                ``"backfill"``, ``"test"``.
+
+        Returns:
+            ``True`` if the notice was new or modified, ``False`` if unchanged.
+        """
         from parse import content_hash
 
         h = content_hash(xml_bytes)
@@ -141,6 +273,14 @@ class StateManager:
         return True
 
     def _remove_parties_for(self, doffin_id):
+        """Remove all party rows for a given notice ID.
+
+        Used before re-inserting updated party rows on notice modification.
+        Operates in-place on :attr:`_parties_rows`.
+
+        Args:
+            doffin_id: Notice identifier whose party rows should be removed.
+        """
         if not self._parties_rows["doffin_id"]:
             return
         keep = [i for i, did in enumerate(self._parties_rows["doffin_id"]) if did != doffin_id]
@@ -150,6 +290,19 @@ class StateManager:
             self._parties_rows[col] = [self._parties_rows[col][i] for i in keep]
 
     def save_raw(self, doffin_id, xml_bytes):
+        """Write raw XML to the raw archive directory.
+
+        Path: ``{state_dir}/raw/{today}/{doffin_id}.xml``.  Never overwrites —
+        multiple downloads of the same notice on the same day produce the
+        same file.
+
+        Args:
+            doffin_id: Notice identifier.
+            xml_bytes: Raw XML as ``bytes``.
+
+        Returns:
+            Absolute path to the written file.
+        """
         today = date.today().isoformat()
         day_dir = os.path.join(self.raw_dir, today)
         os.makedirs(day_dir, exist_ok=True)
@@ -159,6 +312,17 @@ class StateManager:
         return path
 
     def save(self):
+        """Flush all in-memory state to Parquet files.
+
+        Writes three files:
+
+        * ``notices.parquet`` — full snapshot of all notices.
+        * ``parties.parquet`` — full snapshot of all party rows.
+        * ``changelog/{today}.parquet`` — new changelog entries since last save.
+
+        All files use ZSTD compression.  Called by the entrypoint at
+        checkpoint intervals and at the end of each run.
+        """
         rows = list(self._notices_index.values())
         if rows:
             d = {col: [r[col] for r in rows] for col in NOTICES_SCHEMA.names}
@@ -180,6 +344,12 @@ class StateManager:
             print(f"  Saved {len(self._changelog)} changelog entries → {cl_path}", flush=True)
 
     def summary(self):
+        """Return summary counts for logging.
+
+        Returns:
+            Dict with keys ``notices`` (int), ``parties`` (int),
+            ``changelog_new`` (int), ``changelog_modified`` (int).
+        """
         n_new = sum(1 for c in self._changelog if c["change_type"] == "new")
         n_mod = sum(1 for c in self._changelog if c["change_type"] == "modified")
         return {
