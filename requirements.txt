@@ -1,0 +1,4 @@
+requests
+pyarrow
+lxml
+google-cloud-storage
