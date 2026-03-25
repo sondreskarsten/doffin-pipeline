@@ -84,7 +84,7 @@ def sync_to_gcs(state_dir):
     Uploads:
 
     * ``notices.parquet`` and ``parties.parquet`` — overwritten each run.
-    * ``changelog/*.parquet`` — only new files (skips existing).
+    * ``changelog/*.parquet`` — overwritten each checkpoint (file grows during run).
     * ``raw/{date}/*.xml`` — all files.
 
     Args:
@@ -108,9 +108,8 @@ def sync_to_gcs(state_dir):
         for f in os.listdir(cl_dir):
             local = os.path.join(cl_dir, f)
             blob = bucket.blob(f"{GCS_PREFIX}/changelog/{f}")
-            if not blob.exists():
-                blob.upload_from_filename(local)
-                print(f"  Uploaded changelog/{f}", flush=True)
+            blob.upload_from_filename(local)
+            print(f"  Uploaded changelog/{f}", flush=True)
 
     raw_dir = os.path.join(state_dir, "raw")
     if os.path.isdir(raw_dir):
