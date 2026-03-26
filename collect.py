@@ -183,6 +183,9 @@ class DoffinClient:
 
         Issues sequential page requests (pages 1–10, 100 results each).
         Stops early when a page returns fewer than ``MAX_PER_PAGE`` results.
+        Deduplicates by notice ID across pages — the API's sort is unstable
+        within the same publication date, causing ~20% of IDs to appear on
+        multiple pages.
 
         Args:
             date_from: Start date as ``yyyy-mm-dd`` string.
@@ -191,9 +194,10 @@ class DoffinClient:
                 ``"ANNOUNCEMENT_OF_COMPETITION"``).
 
         Returns:
-            Tuple of (hits, numHitsTotal) where *hits* is a list of notice
-            summary dicts and *numHitsTotal* is the API's reported total
-            (may exceed ``len(hits)`` if total > 1 000).
+            Tuple of (hits, numHitsTotal) where *hits* is a deduplicated list
+            of notice summary dicts and *numHitsTotal* is the API's reported
+            total (may exceed ``len(hits)`` due to pagination duplicates and
+            the 1 000 result cap).
 
         Note:
             A single day averages ~50–75 notices.  Monthly windows can reach
@@ -201,6 +205,7 @@ class DoffinClient:
             :meth:`search_all_in_range` instead.
         """
         results = []
+        seen = set()
         params = {
             "numHitsPerPage": self.MAX_PER_PAGE,
             "sortBy": "PUBLICATION_DATE_ASC",
@@ -214,7 +219,10 @@ class DoffinClient:
             params["page"] = page
             d = self.search(params)
             hits = d.get("hits", [])
-            results.extend(hits)
+            for h in hits:
+                if h["id"] not in seen:
+                    seen.add(h["id"])
+                    results.append(h)
             if len(hits) < self.MAX_PER_PAGE:
                 break
         return results, d.get("numHitsTotal", 0)
