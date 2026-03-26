@@ -6,8 +6,9 @@ Maintains three Parquet files on disk (or GCS via :func:`entrypoint.sync_to_gcs`
   change detection, notice metadata, and org/party counts.
 * ``parties.parquet`` — one row per ``(doffin_id, orgnr, role)`` combination,
   with bid values and winner/leader flags.
-* ``changelog/YYYY-MM-DD.parquet`` — append-only daily log of new and
-  modified notices, written once per pipeline run.
+* ``changelog/YYYY-MM-DD.parquet`` — daily log of new and modified notices,
+  overwritten at each checkpoint during a run (file grows as new entries
+  accumulate).
 
 Change detection uses SHA-256 of the raw XML bytes.  If the hash matches
 the stored hash, :meth:`StateManager.ingest_notice` returns ``False``

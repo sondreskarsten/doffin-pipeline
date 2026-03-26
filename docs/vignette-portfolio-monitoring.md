@@ -110,8 +110,8 @@ for orgnr, entries in by_org.items():
 
 | Dataset | Volume | Backfill time | Update frequency |
 |---|---|---|---|
-| Doffin parties | ~300K rows from 151K notices | ~14 h (rate limited) | Daily at 06:00 |
+| Doffin parties | ~300K rows from 151K notices | ~60 h (rate limited, multiple runs) | Daily at 06:00 |
 | Løsøre snapshots | ~310K dokumentnummer | 5 min from existing JSONL | Daily at 02:00 |
 | Kunngjøring inventory | ~245K kids | Completed (one-time scrape) | Weekly or on-demand |
 
-The doffin-pipeline backfill is the bottleneck. The API rate limit (~30 req/10 s) means the full 2017→present corpus requires ~14 hours. After initial backfill, daily runs take 30–60 seconds.
+The doffin-pipeline backfill is the bottleneck. The API rate limit (~30 requests before 429, 10 s cooldown) yields ~2,500 notices/hour sustained. The full 2017→present corpus requires ~60 hours across multiple Cloud Run Job executions (12 h timeout each, GCS checkpoint resume). After initial backfill, daily runs take 30–60 seconds.

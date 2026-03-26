@@ -196,7 +196,7 @@ class DoffinClient:
             (may exceed ``len(hits)`` if total > 1 000).
 
         Note:
-            A single day averages ~50–66 notices.  Monthly windows can reach
+            A single day averages ~50–75 notices.  Monthly windows can reach
             ~1 500.  If ``numHitsTotal > 1 000``, use
             :meth:`search_all_in_range` instead.
         """
@@ -261,7 +261,7 @@ class DoffinClient:
             cross-boundary duplicates.
 
         Note:
-            For a single day (~66 notices), no splitting occurs.  For a full
+            For a single day (~50–75 notices), no splitting occurs.  For a full
             month (~1 500 notices), one split into two ~750-notice halves
             suffices.  The deepest recursion observed is 2 levels (quarterly
             windows of ~4 000 notices).

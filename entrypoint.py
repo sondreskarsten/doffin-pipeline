@@ -14,9 +14,11 @@ Modes:
 * ``daily`` — searches yesterday + today, downloads only new notices.
   Typical runtime: 30–60 s for ~50–130 notices.
 * ``backfill`` — walks a date range in 14-day chunks, downloading all
-  unknown notices.  Full 2017→present backfill: ~151K notices, ~14 h.
-* ``test`` — backfills a single day (2026-03-24) for validation.
-  Runtime: ~30 s for 66 notices.
+  unknown notices.  Full 2017→present backfill: ~151K notices, ~60 h
+  across multiple 12-hour Cloud Run Job executions with GCS checkpoint
+  resume.
+* ``test`` — backfills 2026-03-24 to 2026-03-25 for validation.
+  Runtime: ~60 s for ~125 notices.
 
 Environment variables:
 

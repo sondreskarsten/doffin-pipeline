@@ -180,7 +180,7 @@ Typical response sizes: 10–50 KB for simple notices, up to 150 KB for multi-lo
 
 Headers on 429: `retry-after: 10`. No rate limit headers on 200 responses. No `x-ratelimit-remaining` or `x-ratelimit-reset` headers.
 
-Sustainable throughput: 2–3 requests/second with 12 s backoff on 429.
+Sustainable throughput: 2–3 requests/second with 12 s backoff on 429. Observed during production backfill: ~2,500 notices/hour sustained, with 429 backoffs every ~30 requests. Full 151K corpus requires ~60 hours (multiple 12-hour Cloud Run Job executions with GCS checkpoint resume).
 
 ## Corpus
 
@@ -199,7 +199,7 @@ Sustainable throughput: 2–3 requests/second with 12 s backoff on 429.
 | 2025 | 16,330 |
 | 2026 (partial) | 4,178 |
 
-Average ~50–66 notices/day. Monthly peaks ~1,500.
+Average ~50–75 notices/day. Monthly peaks ~1,500.
 
 ## Divergences from documented OpenAPI spec
 
@@ -210,3 +210,22 @@ Average ~50–66 notices/day. Monthly peaks ~1,500.
 5. Buyer/winner `organizationId` formatting inconsistent (spaces in some orgnr).
 6. `status` is null for RESULT-type notices.
 7. Search results contain duplicate IDs across pages for multi-type queries.
+8. `issue_date` carries `+02:00` timezone suffix on all observed notices, never `Z` (UTC).
+
+## `cbc:CompanyID` format variations in XML
+
+The eForms organization pool's `cbc:CompanyID` field contains Norwegian orgnr in inconsistent formats. These are source data issues in the retroconversion and in contracting authority data entry, not API bugs. `clean_orgnr()` normalizes all of these:
+
+| Pattern | Example | Frequency | Handling |
+|---|---|---|---|
+| Plain 9-digit | `938801363` | ~85% | Passed through |
+| Spaces | `999 601 391` | ~5% | Whitespace stripped |
+| `NO` prefix | `NO981604032` | Rare | Prefix removed |
+| `NO` + `MVA` suffix | `NO952522035MVA` | ~160 instances | Both removed |
+| `MVA` suffix only | `932151286MVA` | ~16 instances | Suffix removed |
+| `Org.nr.` prefix | `Org.nr.978693024` | ~20 instances | Prefix removed |
+| Zero-width Unicode | `983974791<U+200B>` | Rare | ZWS/ZWNJ/BOM stripped |
+| Foreign identifiers | `SE556289739601`, `2348368-2` | ~100 instances | Returns `None` |
+| Garbage | `xxxxxxx`, `N/A`, `DIHVAIKS` | ~50 instances | Returns `None` |
+
+Missing `cbc:CompanyID` entirely (element absent from XML): ~41% of winners and ~64% of tenderers in retroconverted 2017 notices. 0% in post-2023 eForms-native notices.

@@ -35,15 +35,15 @@ One row per Doffin notice. Primary key: `doffin_id`.
 |---|---|---|---|
 | `doffin_id` | string | search | `"2026-105663"` |
 | `root_type` | string | XML | `ContractNotice`, `ContractAwardNotice`, `PriorInformationNotice` |
-| `notice_type_code` | string | XML | eForms subtype code |
-| `issue_date` | string | XML | `"2026-03-23Z"` |
+| `notice_type_code` | string | XML | eForms subtype code (e.g., `cn-standard`, `can-standard`, `pin-only`) |
+| `issue_date` | string | XML | `"2026-03-23+02:00"` (timezone-aware, no trailing Z) |
 | `publication_date` | string | search | `"2026-03-24"` |
-| `procedure_id` | string | XML | Contract folder ID linking related notices |
-| `customization_id` | string | XML | eForms SDK version + Norwegian extension indicator |
+| `procedure_id` | string | XML | Contract folder ID linking related notices. Null for PriorInformationNotice (7.4%). |
+| `customization_id` | string | XML | eForms SDK version. EU notices: `eforms-sdk-1.7#...eforms:eu`. National below-threshold: `...eforms:national`. |
 | `content_hash` | string | derived | SHA-256 first 16 hex chars of raw XML |
-| `xml_size` | int32 | derived | Raw XML byte count |
-| `n_organizations` | int32 | derived | Count from eForms organization pool |
-| `n_parties` | int32 | derived | Count of resolved role assignments |
+| `xml_size` | int32 | derived | Raw XML byte count (8 KB – 872 KB, avg 27 KB) |
+| `n_organizations` | int32 | derived | Count from eForms organization pool (1–185) |
+| `n_parties` | int32 | derived | Count of resolved role assignments (1–184) |
 | `first_seen` | string | derived | UTC ISO timestamp |
 | `last_seen` | string | derived | UTC ISO timestamp |
 
@@ -55,17 +55,17 @@ One row per (notice, organization, role) combination. Composite key: `(doffin_id
 |---|---|---|---|
 | `doffin_id` | string | notice | Parent notice |
 | `role` | string | derived | `buyer`, `winner`, `tenderer`, `subcontractor` |
-| `orgnr` | string | BT-501 | 9-digit Norwegian organization number, spaces stripped |
-| `name` | string | BT-500 | Organization name |
-| `lot_id` | string | XML | Which lot this tender applies to |
-| `tender_value` | string | BT-720 | Bid amount (numeric string, NOK assumed) |
-| `currency` | string | XML | Currency code from `currencyID` attribute |
-| `is_winner` | bool | derived | True if this tender's LotTender is in a SettledContract |
+| `orgnr` | string | BT-501 | 9-digit Norwegian org number. Normalized from `NO`-prefix, `MVA`-suffix, and whitespace variants. `None` for foreign orgs and legacy notices missing `cbc:CompanyID`. |
+| `name` | string | BT-500 | Organization name. Never null. |
+| `lot_id` | string | XML | Which lot this tender applies to. `None` for buyers. `"MISSING"` in retroconverted legacy notices. |
+| `tender_value` | string | BT-720 | Bid amount as numeric string. `None` for buyers and subcontractors. |
+| `currency` | string | XML | ISO currency code from `currencyID` attribute. Usually `NOK`. Also `EUR`, `SEK`, `DKK`, `USD`, `GBP`. |
+| `is_winner` | bool | derived | True if this tender's LotTender is in a SettledContract. Consistent with `role`: `is_winner=True` ↔ `role="winner"`. |
 | `is_leader` | bool | XML | True for group lead in consortium tenders |
 
 ### changelog/YYYY-MM-DD.parquet
 
-Append-only. One file per pipeline run date.
+One file per pipeline run date. Overwritten at each checkpoint (file grows during long backfill runs).
 
 | Column | Type | Description |
 |---|---|---|
@@ -73,7 +73,7 @@ Append-only. One file per pipeline run date.
 | `change_type` | string | `new` or `modified` |
 | `publication_date` | string | From search result |
 | `root_type` | string | XML document type |
-| `buyer_orgnr` | string | Buyer orgnr for quick filtering |
+| `buyer_orgnr` | string | Buyer orgnr for quick portfolio filtering. Null when buyer has no CompanyID in XML. |
 | `buyer_name` | string | Buyer name |
 | `n_parties` | int32 | Total party rows for this notice |
 | `detected_at` | string | UTC timestamp when change was found |
@@ -102,7 +102,7 @@ Consortium:     Multiple Tenderer entries under one TenderingParty,
                 GroupLeadIndicator marks the lead entity
 ```
 
-This resolution is implemented in `parse.py::_resolve_roles()`. The parser follows every reference to its terminal organization, producing flat `(role, orgnr, name, value)` tuples.
+This resolution is implemented in `parse.py::_resolve_roles()`. The parser follows every reference to its terminal organization, producing flat `(role, orgnr, name, value)` tuples. See `docs/vignette-eforms-role-resolution.md` for a worked example with 11 organizations and 22 tenders.
 
 ## Modules
 
@@ -112,10 +112,10 @@ This resolution is implemented in `parse.py::_resolve_roles()`. The parser follo
 
 | Method | Description |
 |---|---|
-| `search(params)` | Single search request, returns parsed JSON |
+| `search(params)` | Single search request, returns parsed JSON (`strict=False` for control chars) |
 | `search_date_range(from, to)` | Paginated search across up to 10 pages (1000 results max) |
 | `search_all_in_range(from, to)` | Recursive date-splitting for windows exceeding 1000 results |
-| `download_xml(doffin_id)` | Fetch raw eForms XML, returns `None` on 404 |
+| `download_xml(doffin_id)` | Fetch raw eForms XML as `bytes`, returns `None` on 404 |
 
 Transport: `requests` library by default (for Cloud Run). Set `USE_CURL=1` for environments with proxy restrictions.
 
@@ -129,7 +129,7 @@ Stateless XML extraction using `lxml`.
 |---|---|
 | `parse_notice(xml_bytes)` | Full extraction: organizations, buyer refs, tendering parties, lot tenders, settled contracts, lot results → resolved parties |
 | `content_hash(xml_bytes)` | SHA-256 truncated to 16 hex chars |
-| `clean_orgnr(raw)` | Strip whitespace from orgnr strings (`"999 601 391"` → `"999601391"`) |
+| `clean_orgnr(raw)` | Normalize orgnr from XML: strips whitespace/`NO`-prefix/`MVA`-suffix/`Org.nr.`-prefix, returns `None` for foreign/garbage IDs |
 
 eForms XML namespaces handled: `cac`, `cbc`, `efac`, `efbc`, `efext`, `ext`.
 
@@ -155,9 +155,9 @@ Mode dispatch and GCS synchronization.
 |---|---|---|
 | `daily` | `RUN_MODE=daily` | Search yesterday+today, download new notices only |
 | `backfill` | `RUN_MODE=backfill` | Walk date range in 14-day chunks, download all unknown notices |
-| `test` | `RUN_MODE=test` | Backfill 2026-03-24 to 2026-03-25 (66 notices) |
+| `test` | `RUN_MODE=test` | Backfill 2026-03-24 to 2026-03-25 (~125 notices) |
 
-GCS sync: if `GCS_BUCKET` is set, downloads state from GCS before run and uploads after. Changelog and raw XML uploaded incrementally.
+GCS sync: if `GCS_BUCKET` is set, downloads state from GCS before run and uploads after. State files and changelog overwritten at each checkpoint. Raw XML uploaded at run completion.
 
 ## Environment variables
 
@@ -177,13 +177,13 @@ GCS sync: if `GCS_BUCKET` is set, downloads state from GCS before run and upload
 ## Usage
 
 ```bash
-# Test mode (66 notices, ~30 seconds)
+# Test mode (~125 notices, ~60 seconds)
 RUN_MODE=test python3 entrypoint.py
 
 # Daily mode
 RUN_MODE=daily python3 entrypoint.py
 
-# Full backfill from 2017 (~151K notices, ~14 hours)
+# Full backfill from 2017 (~151K notices, ~60 hours at rate limit)
 RUN_MODE=backfill BACKFILL_START=2017-01-01 python3 entrypoint.py
 
 # With GCS persistence
@@ -199,24 +199,21 @@ docker run -e DOFFIN_API_KEY=... -e RUN_MODE=daily doffin-pipeline
 
 ## Cloud Run deployment
 
+Image stored at `europe-west4-docker.pkg.dev/sondreskarsten-d7d14/losore/doffin-pipeline:latest`.
+
 ```bash
-# Build and push
-gcloud builds submit --tag europe-north1-docker.pkg.dev/sondreskarsten-d7d14/r-images/doffin-pipeline:latest
+# Build via Cloud Build (source tarball on GCS)
+# Upload source → gs://sondre_brreg_data/doffin/_build/source.tar.gz
+# Trigger build via Cloud Build API targeting europe-west4
 
-# Create job
-gcloud run jobs create doffin-pipeline \
-  --image europe-north1-docker.pkg.dev/sondreskarsten-d7d14/r-images/doffin-pipeline:latest \
-  --region europe-west4 \
-  --cpu 1 --memory 1Gi --task-timeout 36000s --max-retries 0 \
-  --set-env-vars "GCS_BUCKET=sondre_brreg_data,GCS_PREFIX=doffin/state,RUN_MODE=daily,DOFFIN_API_KEY=..."
+# Cloud Run Job (europe-west4)
+#   daily mode: 1 vCPU, 1 GiB, 1h timeout
+#   backfill mode: 1 vCPU, 1 GiB, 12h timeout
 
-# Schedule daily at 06:00 Oslo time (after Doffin publishes)
-gcloud scheduler jobs create http doffin-daily \
-  --location europe-west4 \
-  --schedule "0 6 * * *" --time-zone "Europe/Oslo" \
-  --uri "https://europe-west4-run.googleapis.com/apis/run.googleapis.com/v2/projects/sondreskarsten-d7d14/locations/europe-west4/jobs/doffin-pipeline:run" \
-  --http-method POST \
-  --oauth-service-account-email s1sfreracct@sondreskarsten-d7d14.iam.gserviceaccount.com
+# Cloud Scheduler (europe-west1, only region available)
+#   doffin-daily: 0 6 * * * Europe/Oslo
+#   Target: POST .../jobs/doffin-pipeline:run
+#   Auth: s1sfreracct@sondreskarsten-d7d14.iam.gserviceaccount.com
 ```
 
 ## API specification (empirically tested 2026-03-25)
@@ -268,26 +265,64 @@ Returns raw eForms UBL 2.3 XML. Content-Type is `application/octet-stream` despi
 
 By type: COMPETITION 97,821 / RESULT 41,073 / PLANNING 12,394 / other 95.
 
+## Data quality
+
+### orgnr normalization
+
+`cbc:CompanyID` in eForms XML contains inconsistent formats. `clean_orgnr()` handles:
+
+| Input format | Example | Output | Count in backfill |
+|---|---|---|---|
+| Plain 9-digit | `938801363` | `938801363` | ~85% |
+| Spaces | `999 601 391` | `999601391` | ~5% |
+| `NO` prefix | `NO981604032` | `981604032` | 18 |
+| `NO` prefix + `MVA` | `NO952522035MVA` | `952522035` | 161 |
+| `MVA` suffix | `932151286MVA` | `932151286` | 16 |
+| `Org.nr.` prefix | `Org.nr.978693024` | `978693024` | ~20 |
+| Foreign identifier | `SE556289739601`, `2348368-2` | `None` | ~100 |
+| Garbage | `xxxxxxx`, `N/A`, `0` | `None` | ~50 |
+| Zero-width spaces | `983974791<U+200B>` | `983974791` | ~5 |
+
+### Null orgnr in legacy data
+
+Retroconverted 2017–2018 notices omit `cbc:CompanyID` for many organizations despite having valid names. This is a source data gap in the retroconversion, not a parser issue.
+
+| Role | Null orgnr rate (2017) | Null orgnr rate (2023+) |
+|---|---|---|
+| buyer | ~7% | 0% |
+| winner | ~41% | 0% |
+| tenderer | ~64% | 0% |
+
+Null-orgnr organizations are real entities (Atea AS, Veidekke, Norconsult, Tysvær kommune, etc.). A post-backfill enrichment step matching names against the enhetsregisteret API would recover most of these.
+
+### Other known gaps
+
+`lot_id = "MISSING"` appears on ~183 party rows from retroconverted notices where the original data had no lot structure. `procedure_id` is null on ~7.4% of notices (PriorInformationNotice type, which legitimately lacks a contract folder).
+
 ## Observed irregularities
 
 1. `numHitsPerPage` default is 15, not 20 as documented in OpenAPI spec.
 2. `page` is 1-indexed. The spec implies 0-indexed. `page=0` returns an error.
 3. `numHitsPerPage` accepts values above the documented max of 100.
-4. Buyer orgnr formatting inconsistent in search results: some have spaces (`"999 601 391"`), some don't (`"938801363"`). `parse.py` normalizes via `clean_orgnr()`.
+4. Buyer/winner `organizationId` formatting inconsistent in search results: spaces in some orgnr (`"999 601 391"`), not in others. XML `cbc:CompanyID` has additional variations (`NO`-prefix, `MVA`-suffix, `Org.nr.`-prefix, foreign formats, zero-width Unicode).
 5. `status` is null for RESULT-type notices in search results.
 6. Search results contain duplicate IDs across pages for multi-type queries. Collector deduplicates by ID.
+7. `issue_date` has `+02:00` timezone suffix on all notices (never `Z`), inconsistent with the API documentation showing UTC.
 
-## Output from test mode (2026-03-24, single day)
+## Output from test mode (2026-03-24 to 2026-03-25)
 
 ```
-notices: 66
-parties: 132
-  buyer: 66
-  winner: 28
-  tenderer: 33
-  subcontractor: 5
-unique orgnr: 96
-root_types: ContractNotice 43, ContractAwardNotice 20, PriorInformationNotice 3
+notices: 125
+parties: 235
+  buyer: 137
+  winner: 44
+  tenderer: 47
+  subcontractor: 7
+unique orgnr: 165
+null orgnr: 5
+format violations: 0
+root_types: ContractNotice 76, ContractAwardNotice 39, PriorInformationNotice 10
+customization_id: EU 108, national 17
 ```
 
 ## Relationship to other pipelines
