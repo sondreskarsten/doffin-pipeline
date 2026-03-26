@@ -41,36 +41,61 @@ NS = {
     "ext": "urn:oasis:names:specification:ubl:schema:xsd:CommonExtensionComponents-2",
 }
 
-_ORGNR_CLEAN = re.compile(r"\s+")
+_ORGNR_CLEAN = re.compile(r"[\s\u200b\u200c\u200d\ufeff\u00a0]+")
+_ORGNR_NO_PREFIX = re.compile(r"^NO(\d{9})(?:MVA)?$", re.IGNORECASE)
+_ORGNR_MVA_SUFFIX = re.compile(r"^(\d{9})[Mm][Vv][Aa]$")
+_ORGNR_ORG_NR_PREFIX = re.compile(r"^[Oo]rg\.?nr\.?(\d{9})$")
+_ORGNR_VALID = re.compile(r"^\d{9}$")
 
 
 def clean_orgnr(raw):
-    """Strip whitespace from a Norwegian organization number.
+    """Normalize a Norwegian organization number from eForms XML.
 
-    The Doffin API returns orgnr with inconsistent formatting: some have
-    spaces (``"999 601 391"``), some don't (``"938801363"``).  This function
-    normalizes to a 9-digit string with no spaces.
+    The ``cbc:CompanyID`` field in eForms XML contains inconsistent formats:
+    spaces (``"999 601 391"``), NO-prefix VAT numbers (``"NO952522035MVA"``),
+    MVA suffix (``"932151286MVA"``), ``Org.nr.`` prefix
+    (``"Org.nr.978693024"``), and foreign identifiers (Finnish
+    ``"2348368-2"``, Swedish ``"SE556289739601"``).
+
+    This function strips whitespace, then attempts to extract a 9-digit
+    Norwegian orgnr.  If the result is not 9 digits, returns ``None``
+    (foreign or garbage identifiers are not Norwegian orgnr).
 
     Args:
-        raw: Organization number string, possibly containing whitespace.
-            ``None`` and empty strings are passed through as ``None``.
+        raw: Organization number string from ``cbc:CompanyID``.
+            ``None`` and empty strings return ``None``.
 
     Returns:
-        Cleaned 9-digit string, or ``None`` if input was ``None`` or empty.
+        9-digit Norwegian orgnr string, or ``None`` if the input was
+        empty, not parseable, or not a Norwegian org number.
 
     Examples:
         >>> clean_orgnr("999 601 391")
         '999601391'
-        >>> clean_orgnr("938801363")
-        '938801363'
-        >>> clean_orgnr("  971 524 960  ")
-        '971524960'
+        >>> clean_orgnr("NO952522035MVA")
+        '952522035'
+        >>> clean_orgnr("932151286MVA")
+        '932151286'
+        >>> clean_orgnr("Org.nr.978693024")
+        '978693024'
+        >>> clean_orgnr("NO981604032")
+        '981604032'
+        >>> clean_orgnr("2348368-2") is None
+        True
+        >>> clean_orgnr("SE556289739601") is None
+        True
         >>> clean_orgnr(None) is None
         True
     """
     if not raw:
         return None
-    return _ORGNR_CLEAN.sub("", raw.strip())
+    s = _ORGNR_CLEAN.sub("", raw.strip())
+    if _ORGNR_VALID.match(s):
+        return s
+    m = _ORGNR_NO_PREFIX.match(s) or _ORGNR_MVA_SUFFIX.match(s) or _ORGNR_ORG_NR_PREFIX.match(s)
+    if m:
+        return m.group(1)
+    return None
 
 
 def content_hash(xml_bytes):
