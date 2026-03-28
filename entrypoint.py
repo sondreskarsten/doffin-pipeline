@@ -77,7 +77,7 @@ def sync_from_gcs(state_dir):
         local = os.path.join(state_dir, name)
         if blob.exists():
             blob.download_to_filename(local)
-            print(f"  Downloaded {GCS_PREFIX}/{name} ({blob.size:,} bytes)", flush=True)
+            print(f"  Downloaded {GCS_PREFIX}/{name} ({os.path.getsize(local):,} bytes)", flush=True)
 
 
 def sync_to_gcs(state_dir):
