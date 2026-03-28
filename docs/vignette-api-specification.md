@@ -209,7 +209,7 @@ Average ~50–75 notices/day. Monthly peaks ~1,500.
 4. `page=0` returns an error or empty response rather than the first page.
 5. Buyer/winner `organizationId` formatting inconsistent (spaces in some orgnr).
 6. `status` is null for RESULT-type notices.
-7. Search results contain duplicate IDs across pages for multi-type queries.
+7. Search results contain duplicate IDs across pages. Root cause: the `PUBLICATION_DATE_ASC` sort is unstable within the same publication date — notices shift between pages across requests. Observed: a 2-page result set (100 + 49 hits) had 24 IDs appearing on both pages. `search_date_range()` deduplicates by ID during pagination to prevent duplicate downloads.
 8. `issue_date` carries `+02:00` timezone suffix on all observed notices, never `Z` (UTC).
 
 ## `cbc:CompanyID` format variations in XML

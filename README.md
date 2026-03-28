@@ -199,22 +199,62 @@ docker run -e DOFFIN_API_KEY=... -e RUN_MODE=daily doffin-pipeline
 
 ## Cloud Run deployment
 
-Image stored at `europe-west4-docker.pkg.dev/sondreskarsten-d7d14/losore/doffin-pipeline:latest`.
+### Infrastructure
+
+| Resource | Value |
+|---|---|
+| Docker image | `europe-west4-docker.pkg.dev/sondreskarsten-d7d14/losore/doffin-pipeline:latest` |
+| Artifact Registry repo | `losore` in `europe-west4` (shared with losore-pipeline) |
+| Cloud Run Job | `doffin-pipeline` in `europe-west4` |
+| Cloud Scheduler | `doffin-daily` in `europe-west1` (only available European region) |
+| Service account | `s1sfreracct@sondreskarsten-d7d14.iam.gserviceaccount.com` |
+| Build source | `gs://sondre_brreg_data/doffin/_build/source.tar.gz` |
+| State on GCS | `gs://sondre_brreg_data/doffin/state/` |
+
+### Build and deploy
 
 ```bash
-# Build via Cloud Build (source tarball on GCS)
-# Upload source → gs://sondre_brreg_data/doffin/_build/source.tar.gz
-# Trigger build via Cloud Build API targeting europe-west4
+# 1. Package source
+tar czf /tmp/doffin-source.tar.gz collect.py parse.py state.py entrypoint.py Dockerfile requirements.txt
 
-# Cloud Run Job (europe-west4)
-#   daily mode: 1 vCPU, 1 GiB, 1h timeout
-#   backfill mode: 1 vCPU, 1 GiB, 12h timeout
+# 2. Upload to GCS
+gsutil cp /tmp/doffin-source.tar.gz gs://sondre_brreg_data/doffin/_build/source.tar.gz
 
-# Cloud Scheduler (europe-west1, only region available)
-#   doffin-daily: 0 6 * * * Europe/Oslo
-#   Target: POST .../jobs/doffin-pipeline:run
-#   Auth: s1sfreracct@sondreskarsten-d7d14.iam.gserviceaccount.com
+# 3. Cloud Build (via API — storageSource, not gitSource)
+#    Builds from GCS tarball, pushes to Artifact Registry europe-west4
+
+# 4. Job config
+#    daily:    RUN_MODE=daily,    timeout=3600s  (1h)
+#    backfill: RUN_MODE=backfill, timeout=43200s (12h)
+
+# 5. Scheduler: 0 6 * * * Europe/Oslo → POST .../jobs/doffin-pipeline:run
+#    Paused during backfill, resume after completion.
 ```
+
+### GCS state layout
+
+```
+gs://sondre_brreg_data/doffin/state/
+    notices.parquet          ~1 MB at 37K notices
+    parties.parquet          ~600 KB at 53K parties
+    changelog/
+        2026-03-25.parquet   first run
+        2026-03-28.parquet   resumed backfill
+    raw/
+        2026-03-25/          21,500 XML files from first run
+        2026-03-28/          continuing
+```
+
+### Backfill status
+
+Multiple 12-hour Cloud Run Job executions with GCS checkpoint resume. State files uploaded every 500 notices.
+
+| Execution | Date | Notices | Outcome |
+|---|---|---|---|
+| `s25hr` | 2026-03-25 | 0 → 21,500 | Timeout at 12h |
+| `4fzdf` | 2026-03-25 | — | Failed (scheduler fired during backfill, `sync_from_gcs` bug) |
+| `9grdz` | 2026-03-28 | — | Failed (`blob.size` None bug in `sync_from_gcs`) |
+| `b9ggr` | 2026-03-28 | 21,500 → ongoing | Running |
 
 ## API specification (empirically tested 2026-03-25)
 
@@ -306,7 +346,7 @@ Null-orgnr organizations are real entities (Atea AS, Veidekke, Norconsult, Tysv�
 3. `numHitsPerPage` accepts values above the documented max of 100.
 4. Buyer/winner `organizationId` formatting inconsistent in search results: spaces in some orgnr (`"999 601 391"`), not in others. XML `cbc:CompanyID` has additional variations (`NO`-prefix, `MVA`-suffix, `Org.nr.`-prefix, foreign formats, zero-width Unicode).
 5. `status` is null for RESULT-type notices in search results.
-6. Search results contain duplicate IDs across pages for multi-type queries. Collector deduplicates by ID.
+6. Search results contain duplicate IDs across pages — the API's `PUBLICATION_DATE_ASC` sort is unstable within the same publication date, causing ~20% of IDs to appear on multiple pages. `search_date_range()` deduplicates by ID during pagination.
 7. `issue_date` has `+02:00` timezone suffix on all notices (never `Z`), inconsistent with the API documentation showing UTC.
 
 ## Output from test mode (2026-03-24 to 2026-03-25)
@@ -324,6 +364,25 @@ format violations: 0
 root_types: ContractNotice 76, ContractAwardNotice 39, PriorInformationNotice 10
 customization_id: EU 108, national 17
 ```
+
+## Changelog
+
+### 2026-03-28
+
+* Fixed `sync_from_gcs` crash on resume: `blob.size` is `None` after `download_to_filename()` — use `os.path.getsize()` instead. This bug caused every execution after the first to fail immediately (`ae03239`).
+* Fixed `search_date_range` returning duplicate IDs across pages. The API's `PUBLICATION_DATE_ASC` sort is unstable within the same publication date — ~20% of IDs appear on multiple pages. Added `seen` set dedup during pagination (`a546123`).
+
+### 2026-03-26
+
+* Extended `clean_orgnr()` to handle `NO` prefix, `MVA` suffix, `Org.nr.` prefix, and zero-width Unicode spaces. Previously passed through raw strings like `NO952522035MVA`. Now extracts the 9-digit orgnr and returns `None` for foreign/garbage identifiers. Reduces format violations from 447 to 0 on modern notices (`b163d5f`).
+
+### 2026-03-25
+
+* Fixed `sync_to_gcs` changelog upload: removed `blob.exists()` guard that prevented overwriting the growing changelog file during long backfill runs (`8f9a6ae`).
+* Initial production deployment: Docker image built via Cloud Build, Cloud Run Job created in `europe-west4`, Cloud Scheduler set to `0 6 * * *` Europe/Oslo.
+* Comprehensive docstrings on all functions/methods/classes, 3 vignettes (`9dfc7f0`).
+* Initial README (`58f0bdc`).
+* v1 pipeline: collect, parse, state, entrypoint (`d4a1626`).
 
 ## Relationship to other pipelines
 
