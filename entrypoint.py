@@ -87,7 +87,7 @@ def sync_to_gcs(state_dir):
 
     * ``notices.parquet`` and ``parties.parquet`` — overwritten each run.
     * ``changelog/*.parquet`` — overwritten each checkpoint (file grows during run).
-    * ``raw/{date}/*.xml`` — all files.
+    Raw XML is uploaded inline by :func:`upload_raw`, not here.
 
     Args:
         state_dir: Local directory containing the state files.
@@ -113,16 +113,31 @@ def sync_to_gcs(state_dir):
             blob.upload_from_filename(local)
             print(f"  Uploaded changelog/{f}", flush=True)
 
-    raw_dir = os.path.join(state_dir, "raw")
-    if os.path.isdir(raw_dir):
-        for day in os.listdir(raw_dir):
-            day_dir = os.path.join(raw_dir, day)
-            if not os.path.isdir(day_dir):
-                continue
-            for f in os.listdir(day_dir):
-                local = os.path.join(day_dir, f)
-                blob = bucket.blob(f"{GCS_PREFIX}/raw/{day}/{f}")
-                blob.upload_from_filename(local)
+
+
+
+
+def upload_raw(doffin_id, xml_bytes):
+    """Upload a single raw XML file to GCS immediately after download.
+
+    Called inline during collection, not deferred to ``sync_to_gcs``.
+    This avoids two problems: O(n²) re-uploads at checkpoints, and
+    permanent data loss for XMLs written between the last checkpoint
+    and a timeout kill.
+
+    Args:
+        doffin_id: Notice identifier (used as filename).
+        xml_bytes: Raw XML as ``bytes``.
+    """
+    if not GCS_BUCKET:
+        return
+    from google.cloud import storage
+    from datetime import date
+    client = storage.Client()
+    bucket = client.bucket(GCS_BUCKET)
+    today = date.today().isoformat()
+    blob = bucket.blob(f"{GCS_PREFIX}/raw/{today}/{doffin_id}.xml")
+    blob.upload_from_string(xml_bytes, content_type="application/xml")
 
 
 def run_daily(client, state):
@@ -158,6 +173,7 @@ def run_daily(client, state):
 
         parsed = parse_notice(xml)
         state.save_raw(did, xml)
+        upload_raw(did, xml)
         changed = state.ingest_notice(did, xml, parsed, hit, source="daily")
         if changed:
             ingested += 1
@@ -215,6 +231,7 @@ def run_backfill(client, state, start_date, end_date):
 
             parsed = parse_notice(xml)
             state.save_raw(did, xml)
+            upload_raw(did, xml)
             state.ingest_notice(did, xml, parsed, hit, source="backfill")
             total_ingested += 1
 
