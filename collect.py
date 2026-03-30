@@ -103,8 +103,9 @@ class DoffinClient:
         """Execute a GET request with retry on HTTP 429.
 
         Dispatches to :meth:`_get_curl` or :meth:`_get_requests` depending on
-        the ``USE_CURL`` environment variable.  On 429, sleeps 12 s and
-        retries.
+        the ``USE_CURL`` environment variable.  On 429, sleeps with progressive
+        backoff (15 s, 20 s, 30 s, 45 s, 60 s) to handle rate limit windows
+        that don't fully reset during rapid known-chunk scanning.
 
         Args:
             url: Fully-qualified URL including query string.
@@ -115,17 +116,19 @@ class DoffinClient:
         Raises:
             RuntimeError: If all retries are exhausted.
         """
+        backoffs = [15, 20, 30, 45, 60]
         get_fn = self._get_curl if self._use_curl else self._get_requests
-        for attempt in range(self.max_retries):
+        for attempt in range(len(backoffs)):
             self._request_count += 1
             code, content = get_fn(url)
             if code == 429:
-                print(f"  429 at request #{self._request_count}, sleeping 12s", flush=True)
-                time.sleep(12)
+                sleep_s = backoffs[attempt]
+                print(f"  429 at request #{self._request_count}, sleeping {sleep_s}s (attempt {attempt+1}/{len(backoffs)})", flush=True)
+                time.sleep(sleep_s)
                 continue
             time.sleep(self.delay)
             return code, content
-        raise RuntimeError(f"Failed after {self.max_retries} retries: {url}")
+        raise RuntimeError(f"Failed after {len(backoffs)} retries: {url}")
 
     def _build_url(self, path, params=None):
         """Construct a full API URL from path and optional query parameters.

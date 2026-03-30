@@ -359,3 +359,15 @@ class StateManager:
             "changelog_new": n_new,
             "changelog_modified": n_mod,
         }
+    def max_publication_date(self):
+        """Return the latest publication_date in state, or None if empty.
+
+        Used by backfill to skip ahead past already-ingested date ranges,
+        avoiding hundreds of wasted search requests scanning known chunks.
+
+        Returns:
+            Date string (``yyyy-mm-dd``) or ``None``.
+        """
+        dates = [r["publication_date"] for r in self._notices_index.values()
+                 if r.get("publication_date")]
+        return max(dates) if dates else None

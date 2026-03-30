@@ -203,6 +203,13 @@ def run_backfill(client, state, start_date, end_date):
         end_date: End date as ``yyyy-mm-dd`` string.
     """
     known = state.known_ids()
+    max_pub = state.max_publication_date()
+    if max_pub and len(known) > 0:
+        resume_date = date.fromisoformat(max_pub) - timedelta(days=14)
+        orig_start = start_date
+        start_date = max(start_date, resume_date.isoformat())
+        if start_date != orig_start:
+            print(f"  Skipping ahead: {orig_start} → {start_date} (max pub_date: {max_pub})", flush=True)
     print(f"  Backfill: {start_date} → {end_date}", flush=True)
     print(f"  Known: {len(known):,}", flush=True)
 
