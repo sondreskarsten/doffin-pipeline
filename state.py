@@ -328,12 +328,16 @@ class StateManager:
         if rows:
             d = {col: [r[col] for r in rows] for col in NOTICES_SCHEMA.names}
             table = pa.table(d, schema=NOTICES_SCHEMA)
-            pq.write_table(table, self.notices_path, compression="zstd")
+            pq.write_table(table, self.notices_path, compression="zstd",
+                           compression_level=3, write_statistics=True,
+                           write_page_index=True)
             print(f"  Saved {len(rows):,} notices", flush=True)
 
         if self._parties_rows["doffin_id"]:
             table = pa.table(self._parties_rows, schema=PARTIES_SCHEMA)
-            pq.write_table(table, self.parties_path, compression="zstd")
+            pq.write_table(table, self.parties_path, compression="zstd",
+                           compression_level=3, write_statistics=True,
+                           write_page_index=True)
             print(f"  Saved {len(self._parties_rows['doffin_id']):,} party rows", flush=True)
 
         if self._changelog:
@@ -341,7 +345,9 @@ class StateManager:
             cl_path = os.path.join(self.changelog_dir, f"{today}.parquet")
             d = {col: [r[col] for r in self._changelog] for col in CHANGELOG_SCHEMA.names}
             table = pa.table(d, schema=CHANGELOG_SCHEMA)
-            pq.write_table(table, cl_path, compression="zstd")
+            pq.write_table(table, cl_path, compression="zstd",
+                           compression_level=3, write_statistics=True,
+                           write_page_index=True)
             print(f"  Saved {len(self._changelog)} changelog entries → {cl_path}", flush=True)
 
     def summary(self):
